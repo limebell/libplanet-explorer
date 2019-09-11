@@ -1,13 +1,21 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
-using System.IO;
+using System.Linq;
+using System.Net;
+using System.Threading;
+using System.Threading.Tasks;
 using Libplanet.Action;
+using Libplanet.Blockchain;
+using Libplanet.Blockchain.Policies;
+using Libplanet.Crypto;
 using Libplanet.Explorer.Interfaces;
+using Libplanet.Net;
 using Libplanet.Store;
 using Microsoft.AspNetCore;
 using Microsoft.AspNetCore.Hosting;
-using Mono.Options;
+using Serilog;
+using Serilog.Events;
 
 namespace Libplanet.Explorer.Executable
 {
@@ -16,145 +24,110 @@ namespace Libplanet.Explorer.Executable
     /// </summary>
     public class Program
     {
-        private const string DefaultHost = "0.0.0.0";
-        private const int DefaultPort = 5000;
-        private const string DefaultStoreType = "litedb";
-
-        private static OptionSet options = new OptionSet
+        public static void Main(string[] args)
         {
+            Options options = Options.Parse(args, Console.Error);
+
+            var loggerConfig = new LoggerConfiguration();
+            loggerConfig = options.Debug
+                ? loggerConfig.MinimumLevel.Debug()
+                : loggerConfig.MinimumLevel.Information();
+            loggerConfig = loggerConfig
+                .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
+                .Enrich.FromLogContext()
+                .WriteTo.Console();
+            Log.Logger = loggerConfig.CreateLogger();
+
+            IStore store = new LiteDBStore(options.StorePath, readOnly: options.Seed is null);
+            IBlockPolicy<AppAgnosticAction> policy = new BlockPolicy<AppAgnosticAction>(
+                null,
+                blockIntervalMilliseconds: options.BlockIntervalMilliseconds,
+                minimumDifficulty: options.MinimumDifficulty,
+                difficultyBoundDivisor: options.DifficultyBoundDivisor);
+            var blockChain = new BlockChain<AppAgnosticAction>(policy, store);
+            Startup.BlockChainSingleton = blockChain;
+
+            Swarm<AppAgnosticAction> swarm = null;
+            if (options.Seed is Peer)
             {
-                "s|store-type=",
-                "The storage backend to use.  Available types: " +
-                    string.Join(", ", StoreRegistry.List()) + ".",
-                v => storeTypeName = v
-            },
-            {
-                "H|host=",
-                $"The host address to listen. [{DefaultHost}]",
-                v => host = v
-            },
-            {
-                "p|port=",
-                $"The port number to listen. [{DefaultPort}]",
-                v => portString = v
-            },
-            {
-                "h|help",
-                "Show this message and exit.",
-                v => showHelp = !(v is null)
-            },
-        };
+                // TODO: Take privateKey as a CLI option
+                // TODO: Take appProtocolVersion as a CLI option
+                // TODO: Take host as a CLI option
+                // TODO: Take listenPort as a CLI option
+                if (options.IceServer is null)
+                {
+                    Console.Error.WriteLine(
+                        "error: -s/--seed option requires -I/--ice-server as well."
+                    );
+                    Environment.Exit(1);
+                    return;
+                }
 
-        private static bool showHelp;
-
-        private static string storeTypeName;
-
-        private static string host = DefaultHost;
-
-        private static string portString;
-
-        private static int port = DefaultPort;
-
-        public static int Main(string[] args)
-        {
-            int code = Parse(args);
-            if (code != 0)
-            {
-                return Math.Max(code, 0);
+                swarm = new Swarm<AppAgnosticAction>(
+                    blockChain,
+                    new PrivateKey(),
+                    1,
+                    millisecondsDialTimeout: 1000 * 15,
+                    millisecondsLinger: 1000 * 1,
+                    iceServers: new[] { options.IceServer }
+                );
             }
 
-            BuildWebHost().Run();
-            return 0;
-        }
-
-        public static IWebHost BuildWebHost() =>
-            WebHost.CreateDefaultBuilder()
+            IWebHost webHost = WebHost.CreateDefaultBuilder()
                 .UseStartup<ExplorerStartup<AppAgnosticAction, Startup>>()
-                .UseUrls($"http://{host}:{port}/")
+                .UseSerilog()
+                .UseUrls($"http://{options.Host}:{options.Port}/")
                 .Build();
 
-        internal static int Parse(string[] args)
-        {
-            string programName = System.IO.Path.GetFileName(
-                System.Environment.GetCommandLineArgs()[0]);
-            TextWriter stderr = Console.Error;
-            List<string> extra;
+            var cts = new CancellationTokenSource();
+            Console.CancelKeyPress += (sender, eventArgs) =>
+            {
+                eventArgs.Cancel = true;
+                cts.Cancel();
+            };
+
+            Task swarmTask = Task.Run(
+                async () =>
+                {
+                    if (swarm is null)
+                    {
+                        return;
+                    }
+
+                    var peers = new HashSet<Peer>();
+                    if (options.Seed is Peer peer)
+                    {
+                        peers.Add(peer);
+                    }
+
+                    await swarm.AddPeersAsync(
+                        peers,
+                        cancellationToken: cts.Token
+                    );
+
+                    ImmutableHashSet<Address> trustedPeers =
+                        peers.Select(p => p.Address).ToImmutableHashSet();
+                    await swarm.PreloadAsync(
+                        trustedStateValidators: trustedPeers,
+                        cancellationToken: cts.Token
+                    );
+
+                    await swarm.StartAsync(cancellationToken: cts.Token);
+                },
+                cts.Token
+            );
+
             try
             {
-                extra = options.Parse(args);
+                Task.WaitAll(webHost.RunAsync(cts.Token), swarmTask);
             }
-            catch (OptionException e)
+            catch (OperationCanceledException)
             {
-                stderr.WriteLine("error: {0}", e.Message);
-                stderr.WriteLine(
-                    "Try `{0} --help' for more information.",
-                    programName
-                );
-                return 1;
+                if (swarm is Swarm<AppAgnosticAction>)
+                {
+                    Task.WaitAll(swarm.StopAsync());
+                }
             }
-
-            if (showHelp)
-            {
-                Console.WriteLine(
-                    "Usage: {0} [options] STORE_LOCATOR",
-                    programName
-                );
-                Console.WriteLine();
-                Console.WriteLine("Options:");
-                options.WriteOptionDescriptions(Console.Out);
-                return -1;
-            }
-
-            if (extra.Count > 1)
-            {
-                stderr.WriteLine("error: Too many arguments.");
-                stderr.WriteLine(
-                    "Try `{0} --help' for more information.",
-                    programName
-                );
-                return 1;
-            }
-            else if (extra.Count < 1)
-            {
-                stderr.WriteLine("error: Too few arguments.");
-                stderr.WriteLine(
-                    "Try `{0} --help' for more information.",
-                    programName
-                );
-                return 1;
-            }
-
-            IStore store;
-            try
-            {
-                store = StoreRegistry.Get(storeTypeName ?? DefaultStoreType, extra[0]);
-            }
-            catch (StoreRegistry.StoreNotFoundException e)
-            {
-                stderr.WriteLine(
-                    "error: Invalid -s/--store-type: `{0}'.",
-                    e.TypeName
-                );
-                stderr.WriteLine(
-                    "Available types are: {0}.",
-                    string.Join(", ", StoreRegistry.List())
-                );
-                return 1;
-            }
-
-            Startup.StoreState = store;
-
-            if (portString is null)
-            {
-                port = DefaultPort;
-            }
-            else if (!int.TryParse(portString, out port) || port < 0 || port > 0xffff)
-            {
-                stderr.WriteLine("error: {0} is not a valid port number.", portString);
-                return 1;
-            }
-
-            return 0;
         }
 
         internal class AppAgnosticAction : IAction
@@ -189,11 +162,11 @@ namespace Libplanet.Explorer.Executable
             }
         }
 
-        internal class Startup : IBlockchainStore
+        internal class Startup : IBlockChainContext<AppAgnosticAction>
         {
-            public IStore Store => StoreState;
+            public BlockChain<AppAgnosticAction> BlockChain => BlockChainSingleton;
 
-            internal static IStore StoreState { get; set; }
+            internal static BlockChain<AppAgnosticAction> BlockChainSingleton { get; set; }
         }
     }
 }
