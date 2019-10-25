@@ -36,12 +36,16 @@
     </PackageReference>
     <PackageReference Include="GraphQL" Version="2.4.0" />
     <PackageReference Include="Microsoft.AspNetCore.All" Version="2.2.3" AllowExplicitVersion="true" />
-    <PackageReference Include="Bencodex" Version="0.1.0" />
+    <PackageReference Include="Bencodex" Version="0.2.0" />
     <PackageReference Include="BouncyCastle" Version="1.8.2.0" />
     <PackageReference Include="LiteDB" Version="4.1.4.0" />
     <PackageReference Include="AsyncIO" Version="0.1.69.0" />
     <PackageReference Include="Nito.AsyncEx" Version="5.0.0.0" />
-    <PackageReference Include="Planetarium.NetMQ" Version="4.0.0.259-planetarium" />
+    <PackageReference Include="Planetarium.NetMQ" Version="4.0.0.260-planetarium" />
+    <PackageReference Include="System.Collections.Immutable" Version="1.6.0" />
+    <PackageReference Include="System.Text.Json" Version="4.6.0" />
+    <PackageReference Include="Zio" Version="0.7.4" />
+    <PackageReference Include="LruCacheNet" Version="1.2.0" />
   </ItemGroup>
 
   <ItemGroup>
