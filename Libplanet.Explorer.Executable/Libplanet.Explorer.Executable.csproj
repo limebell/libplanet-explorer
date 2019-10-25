@@ -16,6 +16,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Reference Include="Libplanet">
+      <HintPath>..\Libplanet.dll</HintPath>
+    </Reference>
+    <Reference Include="Libplanet.Stun">
+      <HintPath>..\Libplanet.Stun.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Menees.Analyzers.2017" Version="2.0.3">
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
@@ -28,6 +37,7 @@
       </IncludeAssets>
     </PackageReference>
     <PackageReference Include="CommandLineParser" Version="2.6.0" />
+    <PackageReference Include="AsyncEnumerator" Version="2.2.2" />
   </ItemGroup>
 
   <ItemGroup>
